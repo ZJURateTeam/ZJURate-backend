@@ -1,1 +1,1 @@
-ZJURate 项目后端与合约
+ZJURate 项目后端
