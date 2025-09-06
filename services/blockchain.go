@@ -10,33 +10,40 @@ import (
 
 // BlockchainService manages interactions with the Hyperledger Fabric network.
 type BlockchainService struct {
-	keyStore *KeyStore
-	// In a real app, you would have a separate user service or database
-	// for storing user credentials. Here we'll use a simple map for demonstration.
-	userPasswords map[string]string
+	keyStore  *KeyStore
+	userStore *SQLiteKeyStore
 }
 
 // NewBlockchainService creates a new instance of the blockchain service.
 // This is where you'd load the Fabric connection profile and set up the client.
 func NewBlockchainService(ks *KeyStore) (*BlockchainService, error) {
 	fmt.Println("Blockchain service initialized (placeholder)")
+	// New instance of SQLiteKeyStore for user data
+	userStore, err := NewSQLiteKeyStore("user.db")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user store: %w", err)
+	}
+
 	return &BlockchainService{
-		keyStore:      ks,
-		userPasswords: make(map[string]string),
+		keyStore:  ks,
+		userStore: userStore,
 	}, nil
 }
 
 // RegisterUser generates a key pair and records the public key on the blockchain.
 func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
-	// 1. Hash the password (This should ideally be done in a separate user service layer,
-	// but for this example, we'll keep it here for simplicity)
+	// 1. Hash the password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
-	s.userPasswords[user.StudentID] = string(hashedPassword)
 
-	// 2. Generate a key pair and store the private key securely.
+	// 2. Save user data to the persistent store
+	if err := s.userStore.SaveUser(user.StudentID, user.Username, string(hashedPassword)); err != nil {
+		return fmt.Errorf("failed to save user to store: %w", err)
+	}
+
+	// 3. Generate a key pair and store the private key securely.
 	publicKey, err := s.keyStore.GenerateKeyPair(user.StudentID)
 	if err != nil {
 		return fmt.Errorf("failed to generate key pair: %w", err)
@@ -47,7 +54,7 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 		return fmt.Errorf("failed to encode public key: %w", err)
 	}
 
-	// 3. Prepare the data to be put on the blockchain.
+	// 4. Prepare the data to be put on the blockchain.
 	bcUser := struct {
 		StudentID string `json:"studentId"`
 		Username  string `json:"username"`
@@ -58,7 +65,7 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 		PublicKey: publicKeyPEM,
 	}
 
-	// 4. TODO: Use the blockchain service to submit a transaction
+	// 5. TODO: Use the blockchain service to submit a transaction
 	// to register the user with their public key.
 	fmt.Printf("Submitting RegisterUser transaction with public key for studentId: %s\n", bcUser.StudentID)
 
@@ -68,21 +75,21 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 
 // LoginUser authenticates a user and returns their blockchain key.
 func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, error) {
-	// 1. Check if the user exists
-	hashedPassword, ok := s.userPasswords[login.StudentID]
-	if !ok {
-		return nil, fmt.Errorf("user not found")
+	// 1. Retrieve user data from the persistent store
+	user, err := s.userStore.GetUser(login.StudentID)
+	if err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
 	// 2. Authenticate the password
-	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(login.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(login.Password)); err != nil {
 		return nil, fmt.Errorf("invalid password")
 	}
 
 	// TODO: Retrieve user's public key from the blockchain
 	// For now, we'll simulate a successful login
 	fmt.Printf("User with studentId: %s authenticated successfully\n", login.StudentID)
-	return &models.User{StudentID: login.StudentID, Username: "犬戎"}, nil
+	return &models.User{StudentID: user.StudentID, Username: user.Username}, nil
 }
 
 // GetAllMerchants fetches all merchants from the blockchain.
