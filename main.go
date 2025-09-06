@@ -13,7 +13,11 @@ import (
 )
 
 func main() {
-	keyStore := services.NewKeyStore()
+	keyStore, err := services.NewKeyStore("keystore.db")
+	if err != nil {
+		log.Fatalf("Failed to create key store: %v", err)
+	}
+	defer keyStore.PrivateKeyStore.Close() // 确保在应用退出时关闭数据库连接
 
 	blockchainService, err := services.NewBlockchainService(keyStore)
 	if err != nil {

@@ -9,44 +9,61 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"sync"
 )
 
 // KeyStore manages the secure storage of private keys.
 type KeyStore struct {
-	// In a real application, this would be a secure, encrypted database or an HSM.
-	privateKeys map[string]*rsa.PrivateKey
-	mu          sync.RWMutex
+	// 这是一个更安全、持久的存储后端。
+	PrivateKeyStore *SQLiteKeyStore
 }
 
-func NewKeyStore() *KeyStore {
-	return &KeyStore{
-		privateKeys: make(map[string]*rsa.PrivateKey),
+func NewKeyStore(dbPath string) (*KeyStore, error) {
+	sqliteStore, err := NewSQLiteKeyStore(dbPath)
+	if err != nil {
+		return nil, err
 	}
+	return &KeyStore{
+		PrivateKeyStore: sqliteStore,
+	}, nil
 }
 
-// GenerateKeyPair generates an RSA key pair and stores the private key.
+// GenerateKeyPair generates an RSA key pair and stores the private key in the database.
 func (ks *KeyStore) GenerateKeyPair(studentID string) (*rsa.PublicKey, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	ks.mu.Lock()
-	ks.privateKeys[studentID] = privateKey
-	ks.mu.Unlock()
+	privateKeyPEM, err := ks.PrivateKeyToPEM(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode private key: %w", err)
+	}
+
+	// 保存私钥到数据库
+	if err := ks.PrivateKeyStore.SavePrivateKey(studentID, privateKeyPEM); err != nil {
+		return nil, fmt.Errorf("failed to save private key: %w", err)
+	}
 
 	return &privateKey.PublicKey, nil
 }
 
-// GetPrivateKey retrieves a private key for a given student ID.
+// GetPrivateKey retrieves a private key for a given student ID from the database.
 func (ks *KeyStore) GetPrivateKey(studentID string) (*rsa.PrivateKey, error) {
-	ks.mu.RLock()
-	privateKey, ok := ks.privateKeys[studentID]
-	ks.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("private key not found for student ID: %s", studentID)
+	privateKeyPEM, err := ks.PrivateKeyStore.GetPrivateKey(studentID)
+	if err != nil {
+		return nil, err
 	}
+
+	block, _ := pem.Decode(privateKeyPEM)
+	if block == nil || block.Type != "RSA PRIVATE KEY" {
+		return nil, fmt.Errorf("failed to decode PEM block containing private key")
+	}
+
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
 	return privateKey, nil
 }
 
@@ -63,6 +80,16 @@ func (ks *KeyStore) Sign(studentID string, message []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to sign message: %w", err)
 	}
 	return signature, nil
+}
+
+// PrivateKeyToPEM converts a private key to a PEM-encoded string.
+func (ks *KeyStore) PrivateKeyToPEM(privateKey *rsa.PrivateKey) ([]byte, error) {
+	privateBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	privatePEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privateBytes,
+	})
+	return privatePEM, nil
 }
 
 // PublicKeyToPEM converts a public key to a PEM-encoded string.

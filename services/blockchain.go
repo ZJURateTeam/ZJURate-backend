@@ -5,32 +5,38 @@ import (
 	"fmt"
 
 	"github.com/ZJURateTeam/ZJURate-backend/models"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // BlockchainService manages interactions with the Hyperledger Fabric network.
 type BlockchainService struct {
 	keyStore *KeyStore
-	// Fabric SDK components would go here, e.g.,
-	// fabricSDK *fabsdk.FabricSDK
-	// channelClient *channel.Client
+	// In a real app, you would have a separate user service or database
+	// for storing user credentials. Here we'll use a simple map for demonstration.
+	userPasswords map[string]string
 }
 
 // NewBlockchainService creates a new instance of the blockchain service.
 // This is where you'd load the Fabric connection profile and set up the client.
 func NewBlockchainService(ks *KeyStore) (*BlockchainService, error) {
-	// TODO: Implement the real Fabric SDK setup here.
-	// Example:
-	// sdk, err := fabsdk.New(config.FromFile("connection-profile.yaml"))
-	// if err != nil { ... }
-	//
-	// You'll need to define your connection profile and wallet for user certificates.
 	fmt.Println("Blockchain service initialized (placeholder)")
-	return &BlockchainService{keyStore: ks}, nil
+	return &BlockchainService{
+		keyStore:      ks,
+		userPasswords: make(map[string]string),
+	}, nil
 }
 
 // RegisterUser generates a key pair and records the public key on the blockchain.
 func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
-	// 1. Generate a key pair and store the private key securely.
+	// 1. Hash the password (This should ideally be done in a separate user service layer,
+	// but for this example, we'll keep it here for simplicity)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+	s.userPasswords[user.StudentID] = string(hashedPassword)
+
+	// 2. Generate a key pair and store the private key securely.
 	publicKey, err := s.keyStore.GenerateKeyPair(user.StudentID)
 	if err != nil {
 		return fmt.Errorf("failed to generate key pair: %w", err)
@@ -41,8 +47,7 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 		return fmt.Errorf("failed to encode public key: %w", err)
 	}
 
-	// 2. Prepare the data to be put on the blockchain.
-	// We'll simulate a user object with the public key.
+	// 3. Prepare the data to be put on the blockchain.
 	bcUser := struct {
 		StudentID string `json:"studentId"`
 		Username  string `json:"username"`
@@ -53,19 +58,30 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 		PublicKey: publicKeyPEM,
 	}
 
-	// 3. TODO: Use the blockchain service to submit a transaction
+	// 4. TODO: Use the blockchain service to submit a transaction
 	// to register the user with their public key.
-	// This would involve a chaincode call like `chaincode.Invoke("RegisterUser", bcUser)`.
 	fmt.Printf("Submitting RegisterUser transaction with public key for studentId: %s\n", bcUser.StudentID)
 
+	// Simulation of success
 	return nil
 }
 
 // LoginUser authenticates a user and returns their blockchain key.
 func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, error) {
-	// TODO: Authenticate the user against the backend's stored credentials.
-	// If successful, retrieve the associated blockchain key/credentials.
-	fmt.Printf("Authenticating user with studentId: %s\n", login.StudentID)
+	// 1. Check if the user exists
+	hashedPassword, ok := s.userPasswords[login.StudentID]
+	if !ok {
+		return nil, fmt.Errorf("user not found")
+	}
+
+	// 2. Authenticate the password
+	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(login.Password)); err != nil {
+		return nil, fmt.Errorf("invalid password")
+	}
+
+	// TODO: Retrieve user's public key from the blockchain
+	// For now, we'll simulate a successful login
+	fmt.Printf("User with studentId: %s authenticated successfully\n", login.StudentID)
 	return &models.User{StudentID: login.StudentID, Username: "犬戎"}, nil
 }
 

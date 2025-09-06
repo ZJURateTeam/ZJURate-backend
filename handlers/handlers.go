@@ -2,21 +2,46 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/ZJURateTeam/ZJURate-backend/models"
 	"github.com/ZJURateTeam/ZJURate-backend/services"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // AuthHandler handles user authentication logic.
 type AuthHandler struct {
 	blockchainService *services.BlockchainService
+	// 用于 JWT 签名的密钥
+	jwtSecretKey []byte
 }
 
 func NewAuthHandler(bs *services.BlockchainService) *AuthHandler {
-	return &AuthHandler{blockchainService: bs}
+	secretKey := os.Getenv("JWT_SECRET_KEY")
+	if secretKey == "" {
+		secretKey = "supersecretjwtkeyforzjurate"
+		fmt.Println("Warning: JWT_SECRET_KEY environment variable not set, using default key.")
+	}
+	return &AuthHandler{
+		blockchainService: bs,
+		jwtSecretKey:      []byte(secretKey),
+	}
+}
+
+// generateToken generates a JWT for a user.
+func (h *AuthHandler) generateToken(user models.User) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"studentId": user.StudentID,
+		"username":  user.Username,
+		"exp":       time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
+	})
+	return token.SignedString(h.jwtSecretKey)
 }
 
 // Register handles user registration.
@@ -26,7 +51,22 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid input"})
 		return
 	}
-	// TODO: Call h.blockchainService.RegisterUser(user)
+
+	// 1. Hash the password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to hash password"})
+		return
+	}
+
+	user.Password = string(hashedPassword) // Store the hashed password
+
+	// 2. Call blockchain service to register the user
+	if err := h.blockchainService.RegisterUser(user); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Registration failed", "error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, models.Message{Message: "Register Successful"})
 }
 
@@ -37,16 +77,29 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid input"})
 		return
 	}
-	// TODO: Call h.blockchainService.LoginUser(login) and get a token
+
+	// 1. Call blockchain service to authenticate the user
+	user, err := h.blockchainService.LoginUser(login)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"message": "Authentication failed", "error": err.Error()})
+		return
+	}
+
+	// 2. Generate a JWT token
+	tokenString, err := h.generateToken(*user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to generate token"})
+		return
+	}
+
 	c.JSON(http.StatusOK, models.Token{
-		Token: "fake.jwt.token.string.for.testing",
-		User:  models.User{StudentID: login.StudentID, Username: "犬戎"},
+		Token: tokenString,
+		User:  *user,
 	})
 }
 
 // GetMe retrieves the current logged-in user's info.
 func (h *AuthHandler) GetMe(c *gin.Context) {
-	// User info is available in the context from the AuthMiddleware
 	user, exists := c.Get("user")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
