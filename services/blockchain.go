@@ -3,128 +3,223 @@ package services
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/ZJURateTeam/ZJURate-backend/models"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// BlockchainService manages interactions with the Hyperledger Fabric network.
+// BlockchainService manages interactions with a mock Hyperledger Fabric network.
+// This mock implementation simulates the blockchain's ledger in memory.
 type BlockchainService struct {
-	keyStore *KeyStore
-	// In a real app, you would have a separate user service or database
-	// for storing user credentials. Here we'll use a simple map for demonstration.
-	userPasswords map[string]string
+	keyStore  *KeyStore
+	userStore *SQLiteKeyStore
+	// In-memory ledgers to simulate blockchain state
+	merchants map[string]models.MerchantDetails
+	reviews   map[string]models.Review
+	mu        sync.RWMutex // Mutex to protect concurrent access to the mock ledger
 }
 
-// NewBlockchainService creates a new instance of the blockchain service.
-// This is where you'd load the Fabric connection profile and set up the client.
+// NewBlockchainService creates a new instance of the mock blockchain service.
 func NewBlockchainService(ks *KeyStore) (*BlockchainService, error) {
-	fmt.Println("Blockchain service initialized (placeholder)")
+	fmt.Println("Mock Blockchain service initialized (simulating in-memory ledger)")
+	userStore, err := NewSQLiteKeyStore("user.db")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user store: %w", err)
+	}
+
 	return &BlockchainService{
-		keyStore:      ks,
-		userPasswords: make(map[string]string),
+		keyStore:  ks,
+		userStore: userStore,
+		merchants: make(map[string]models.MerchantDetails),
+		reviews:   make(map[string]models.Review),
+		mu:        sync.RWMutex{},
 	}, nil
 }
 
-// RegisterUser generates a key pair and records the public key on the blockchain.
+// RegisterUser generates a key pair and records the public key in the mock ledger.
 func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
-	// 1. Hash the password (This should ideally be done in a separate user service layer,
-	// but for this example, we'll keep it here for simplicity)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Save user data to the persistent store
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
-	s.userPasswords[user.StudentID] = string(hashedPassword)
+
+	if err := s.userStore.SaveUser(user.StudentID, user.Username, string(hashedPassword)); err != nil {
+		return fmt.Errorf("failed to save user to store: %w", err)
+	}
 
 	// 2. Generate a key pair and store the private key securely.
-	publicKey, err := s.keyStore.GenerateKeyPair(user.StudentID)
-	if err != nil {
+	if _, err := s.keyStore.GenerateKeyPair(user.StudentID); err != nil {
 		return fmt.Errorf("failed to generate key pair: %w", err)
 	}
 
-	publicKeyPEM, err := s.keyStore.PublicKeyToPEM(publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to encode public key: %w", err)
-	}
+	// 3. Simulate a blockchain transaction for user registration.
+	// In a real scenario, this is where a Fabric SDK call would go.
+	// We'll just print a confirmation for now.
+	fmt.Printf("Mock Blockchain: Registered user %s. Public key would be submitted to ledger.\n", user.StudentID)
 
-	// 3. Prepare the data to be put on the blockchain.
-	bcUser := struct {
-		StudentID string `json:"studentId"`
-		Username  string `json:"username"`
-		PublicKey string `json:"publicKey"`
-	}{
-		StudentID: user.StudentID,
-		Username:  user.Username,
-		PublicKey: publicKeyPEM,
-	}
-
-	// 4. TODO: Use the blockchain service to submit a transaction
-	// to register the user with their public key.
-	fmt.Printf("Submitting RegisterUser transaction with public key for studentId: %s\n", bcUser.StudentID)
-
-	// Simulation of success
 	return nil
 }
 
-// LoginUser authenticates a user and returns their blockchain key.
+// LoginUser authenticates a user.
 func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, error) {
-	// 1. Check if the user exists
-	hashedPassword, ok := s.userPasswords[login.StudentID]
-	if !ok {
-		return nil, fmt.Errorf("user not found")
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	user, err := s.userStore.GetUser(login.StudentID)
+	if err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
-	// 2. Authenticate the password
-	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(login.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(login.Password)); err != nil {
 		return nil, fmt.Errorf("invalid password")
 	}
 
-	// TODO: Retrieve user's public key from the blockchain
-	// For now, we'll simulate a successful login
-	fmt.Printf("User with studentId: %s authenticated successfully\n", login.StudentID)
-	return &models.User{StudentID: login.StudentID, Username: "犬戎"}, nil
+	fmt.Printf("Mock Blockchain: User %s authenticated successfully.\n", login.StudentID)
+	return &models.User{StudentID: user.StudentID, Username: user.Username}, nil
 }
 
-// GetAllMerchants fetches all merchants from the blockchain.
+// GetAllMerchants fetches all merchants from the mock ledger.
 func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) {
-	// TODO: Call chaincode to query all merchants.
-	fmt.Println("Querying all merchants from the blockchain...")
-	return []models.MerchantSummary{}, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	merchants := make([]models.MerchantSummary, 0, len(s.merchants))
+	for _, m := range s.merchants {
+		// Calculate average rating dynamically for the mock data
+		var totalRating int
+		var reviewCount int
+		for _, r := range s.reviews {
+			if r.MerchantID == m.ID {
+				totalRating += r.Rating
+				reviewCount++
+			}
+		}
+		avgRating := 0.0
+		if reviewCount > 0 {
+			avgRating = float64(totalRating) / float64(reviewCount)
+		}
+
+		merchants = append(merchants, models.MerchantSummary{
+			ID:            m.ID,
+			Name:          m.Name,
+			Category:      m.Category,
+			AverageRating: avgRating,
+		})
+	}
+	return merchants, nil
 }
 
-// GetMerchant fetches a single merchant and their reviews.
+// GetMerchant fetches a single merchant and their reviews from the mock ledger.
 func (s *BlockchainService) GetMerchant(merchantID string) (*models.MerchantDetails, error) {
-	// TODO: Call chaincode to get a specific merchant and their reviews.
-	fmt.Printf("Querying merchant %s and their reviews...\n", merchantID)
-	return nil, nil
-}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-// CreateReview submits a new review to the blockchain.
-func (s *BlockchainService) CreateReview(studentID string, review models.ReviewCreate) (string, error) {
-	// 1. Convert the review object into a format suitable for signing (e.g., JSON bytes).
-	// In a real app, you would define a canonical format for signing payloads.
-	reviewBytes := []byte(fmt.Sprintf("%+v", review))
-
-	// 2. Use the KeyStore to sign the review data.
-	signature, err := s.keyStore.Sign(studentID, reviewBytes)
-	if err != nil {
-		return "", err
+	merchant, ok := s.merchants[merchantID]
+	if !ok {
+		return nil, fmt.Errorf("merchant not found")
 	}
 
-	// 3. TODO: Call chaincode to submit the new review transaction,
-	// including the review data and the signature.
-	// The chaincode will then verify the signature using the author's public key
-	// stored on the blockchain.
-	fmt.Printf("Submitting new review for merchant %s, signed by user %s\n", review.MerchantID, studentID)
-	fmt.Printf("Signature: %x\n", signature)
+	// Fetch all reviews for this merchant
+	var reviews []models.Review
+	var totalRating int
+	var reviewCount int
+	for _, r := range s.reviews {
+		if r.MerchantID == merchantID {
+			reviews = append(reviews, r)
+			totalRating += r.Rating
+			reviewCount++
+		}
+	}
 
-	// The chaincode would return a transaction ID.
-	return "fake_tx_id", nil
+	avgRating := 0.0
+	if reviewCount > 0 {
+		avgRating = float64(totalRating) / float64(reviewCount)
+	}
+
+	details := &models.MerchantDetails{
+		ID:            merchant.ID,
+		Name:          merchant.Name,
+		Address:       merchant.Address,
+		Category:      merchant.Category,
+		AverageRating: avgRating,
+		Reviews:       reviews,
+	}
+	return details, nil
 }
 
-// GetReviewsByUser fetches reviews by a specific user ID.
+// CreateMerchant simulates creating a new merchant on the mock ledger.
+func (s *BlockchainService) CreateMerchant(studentID string, merchant models.MerchantDetails) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.merchants[merchant.ID]; exists {
+		return "", fmt.Errorf("merchant with this ID already exists")
+	}
+
+	// Simulate signing the transaction payload.
+	payload := fmt.Sprintf("%s-%s-%s", merchant.ID, merchant.Name, studentID)
+	_, err := s.keyStore.Sign(studentID, []byte(payload))
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	// In a real scenario, chaincode would validate the signature and a unique ID.
+	txID := fmt.Sprintf("mock_merchant_tx_%d", time.Now().UnixNano())
+
+	// Add the merchant to our in-memory ledger
+	s.merchants[merchant.ID] = merchant
+
+	fmt.Printf("Mock Blockchain: New merchant '%s' created by user '%s' with txID %s.\n", merchant.Name, studentID, txID)
+	return txID, nil
+}
+
+// CreateReview simulates submitting a new review to the mock ledger.
+func (s *BlockchainService) CreateReview(studentID string, review models.ReviewCreate) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Simulate signing the transaction payload.
+	payload := fmt.Sprintf("%s-%d-%s", review.MerchantID, review.Rating, studentID)
+	_, err := s.keyStore.Sign(studentID, []byte(payload))
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	// In a real scenario, chaincode would create a unique ID.
+	txID := fmt.Sprintf("mock_review_tx_%d", time.Now().UnixNano())
+
+	newReview := models.Review{
+		ID:         txID,
+		MerchantID: review.MerchantID,
+		AuthorID:   studentID,
+		Rating:     review.Rating,
+		Comment:    review.Comment,
+		Timestamp:  time.Now().Format(time.RFC3339),
+	}
+
+	// Add the review to our in-memory ledger
+	s.reviews[txID] = newReview
+
+	fmt.Printf("Mock Blockchain: New review for merchant '%s' submitted by user '%s' with txID %s.\n", review.MerchantID, studentID, txID)
+	return txID, nil
+}
+
+// GetReviewsByUser fetches reviews by a specific user ID from the mock ledger.
 func (s *BlockchainService) GetReviewsByUser(userID string) ([]models.Review, error) {
-	// TODO: Call chaincode to query reviews by the author's ID.
-	fmt.Printf("Querying reviews by user %s\n", userID)
-	return []models.Review{}, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var userReviews []models.Review
+	for _, r := range s.reviews {
+		if r.AuthorID == userID {
+			userReviews = append(userReviews, r)
+		}
+	}
+	return userReviews, nil
 }
