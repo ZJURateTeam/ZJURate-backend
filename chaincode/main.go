@@ -5,7 +5,7 @@ import (
     "log"
 
     "github.com/hyperledger/fabric-contract-api-go/contractapi"
-	"github.com/zgyxclyty/ZJURate-backend/chaincode/review"
+	"github.com/ZJURateTeam/ZJURate-backend/chaincode/review"
 )
 
 func main() {
