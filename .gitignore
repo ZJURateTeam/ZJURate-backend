@@ -2,3 +2,6 @@ ZJURate-backend.exe
 ZJURate-backend
 
 .vscode
+vendor
+wallet
+connection.yaml
