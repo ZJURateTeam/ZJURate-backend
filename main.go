@@ -5,12 +5,20 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"encoding/json"
+	"strconv"
+	"crypto/x509"
+	"path/filepath"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hyperledger/fabric-gateway/pkg/client"
+	"github.com/hyperledger/fabric-gateway/pkg/identity"
+	"github.com/hyperledger/fabric-gateway/pkg/hash"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
-// --- Models ---
-
+// --- Models --- (保持原样)
 type UserRegister struct {
 	StudentID string `json:"studentId"`
 	Username  string `json:"username"`
@@ -76,41 +84,120 @@ type TxResponse struct {
 
 var loggedInUser = User{StudentID: "3240100001", Username: "犬戎"}
 
-var fakeReviews = []Review{
-	{"REV5001", "MER001", "3240100008", 5, "好吃！就是人有点多。", time.Now().Format(time.RFC3339)},
-	{"REV5002", "MER001", "3240100015", 4, "价格实惠，分量足。", time.Now().Format(time.RFC3339)},
-	{"REV5003", "MER002", "3240100008", 5, "打印速度超快，老板人很好。", time.Now().Format(time.RFC3339)},
-	{"REV5003", "MER002", "3240100009", 1, "全价四万了盗我整理的讲义卖", time.Now().Format(time.RFC3339)},
-	{"REV5004", "MER003", "3240100001", 3, "东西还行，就是有点贵。", time.Now().Format(time.RFC3339)},
-}
+// --- Fabric Gateway (新版 SDK 初始化) ---
 
-var fakeMerchantsDetails = []MerchantDetails{
-	{"MER001", "银泉食堂", "北教旁边", "餐饮", 4.5, filterReviews("MER001")},
-	{"MER002", "蓝田文印店", "蓝田大门西侧50米", "打印", 3.0, filterReviews("MER002")},
-	{"MER003", "启真教育超市", "白沙1幢楼下", "超市", 3.0, filterReviews("MER003")},
-}
+var gateway *client.Gateway
 
-var fakeMerchantsSummary = []MerchantSummary{
-	{"MER001", "银泉食堂", "餐饮", 4.5},
-	{"MER002", "蓝田文印店", "打印", 3.0},
-	{"MER003", "启真教育超市", "超市", 3.0},
-}
-
-// --- Helper Functions ---
-
-func filterReviews(merchantID string) []Review {
-	result := []Review{}
-	for _, r := range fakeReviews {
-		if r.MerchantID == merchantID {
-			result = append(result, r)
-		}
+func initGateway() error {
+	clientConnection, err := newGrpcConnection()
+	if err != nil {
+		return fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
-	return result
+
+	id, err := newIdentity()
+	if err != nil {
+		return fmt.Errorf("failed to create identity: %w", err)
+	}
+
+	sign, err := newSign()
+	if err != nil {
+		return fmt.Errorf("failed to create sign: %w", err)
+	}
+
+	gateway, err = client.Connect(
+		id,
+		client.WithSign(sign),
+		client.WithHash(hash.SHA256),
+		client.WithClientConnection(clientConnection),
+		client.WithEvaluateTimeout(5 * time.Second),
+		client.WithEndorseTimeout(15 * time.Second),
+		client.WithSubmitTimeout(5 * time.Second),
+		client.WithCommitStatusTimeout(1 * time.Minute),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+
+	return nil
+}
+
+// newGrpcConnection creates a gRPC connection to the Gateway server.
+func newGrpcConnection() (*grpc.ClientConn, error) {
+	certPath := filepath.Join("wallet", "appUser", "tlscacerts", "tls-ca-cert.pem")  // 调整为您的 TLS CA 路径
+	certificatePEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read TLS certificate: %w", err)
+	}
+
+	certificate, err := identity.CertificateFromPEM(certificatePEM)
+	if err != nil {
+		return nil, err
+	}
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(certificate)
+	transportCredentials := credentials.NewClientTLSFromCert(certPool, "localhost")  // 调整 gateway host 如果非 localhost
+
+	connection, err := grpc.Dial("localhost:7051", grpc.WithTransportCredentials(transportCredentials))  // 调整 peer endpoint
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
+	}
+
+	return connection, nil
+}
+
+// newIdentity creates a client identity using an X.509 certificate.
+func newIdentity() (*identity.X509Identity, error) {
+	certPath := filepath.Join("wallet", "appUser", "signcerts", "cert.pem")  // 调整为您的 cert 路径
+	certificatePEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read certificate: %w", err)
+	}
+
+	certificate, err := identity.CertificateFromPEM(certificatePEM)
+	if err != nil {
+		return nil, err
+	}
+
+	id, err := identity.NewX509Identity("Org1MSP", certificate)  // MSP ID 调整为您的组织
+	if err != nil {
+		return nil, err
+	}
+
+	return id, nil
+}
+
+// newSign creates a function that generates a digital signature from a message digest using a private key.
+func newSign() (identity.Sign, error) {
+	keyPath := filepath.Join("wallet", "appUser", "keystore", "priv_sk")  // 调整为您的私钥路径
+	privateKeyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read private key: %w", err)
+	}
+
+	privateKey, err := identity.PrivateKeyFromPEM(privateKeyPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	sign, err := identity.NewPrivateKeySign(privateKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return sign, nil
 }
 
 // --- Main ---
 
 func main() {
+	err := initGateway()
+	if err != nil {
+		fmt.Printf("Gateway init failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer gateway.Close()
+
 	router := gin.Default()
 
 	// CORS middleware
@@ -170,22 +257,76 @@ func main() {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized or token expired"})
 	})
 
-	// Merchants
+	// Merchants (使用新版 Contract)
 	router.GET("/api/merchants", func(c *gin.Context) {
-		c.JSON(http.StatusOK, fakeMerchantsSummary)
+		network := gateway.GetNetwork("mychannel")
+		contract := network.GetContract("reviews")
+
+		result, err := contract.EvaluateTransaction("GetAllMerchants")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Query failed: " + err.Error()})
+			return
+		}
+
+		var merchants []MerchantSummary
+		err = json.Unmarshal(result, &merchants)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Unmarshal failed"})
+			return
+		}
+
+		// 可选: 计算 AverageRating
+		for i := range merchants {
+			reviewsResult, _ := contract.EvaluateTransaction("GetReviewsByMerchant", merchants[i].ID)
+			var reviews []Review
+			json.Unmarshal(reviewsResult, &reviews)
+			if len(reviews) > 0 {
+				total := 0
+				for _, r := range reviews {
+					total += r.Rating
+				}
+				merchants[i].AverageRating = float64(total) / float64(len(reviews))
+			}
+		}
+		c.JSON(http.StatusOK, merchants)
 	})
 
 	router.GET("/api/merchants/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		for _, m := range fakeMerchantsDetails {
-			if m.ID == id {
-				c.JSON(http.StatusOK, m)
-				return
+
+		network := gateway.GetNetwork("mychannel")
+		contract := network.GetContract("reviews")
+
+		merchantResult, err := contract.EvaluateTransaction("GetMerchantByID", id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"message": "Merchant not found: " + err.Error()})
+			return
+		}
+
+		var merchant MerchantDetails
+		err = json.Unmarshal(merchantResult, &merchant)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Unmarshal failed"})
+			return
+		}
+
+		reviewsResult, err := contract.EvaluateTransaction("GetReviewsByMerchant", id)
+		if err == nil {
+			var reviews []Review
+			json.Unmarshal(reviewsResult, &reviews)
+			merchant.Reviews = reviews
+			if len(reviews) > 0 {
+				total := 0
+				for _, r := range reviews {
+					total += r.Rating
+				}
+				merchant.AverageRating = float64(total) / float64(len(reviews))
 			}
 		}
-		c.JSON(http.StatusNotFound, gin.H{"message": "Merchant not found"})
-	})
 
+		c.JSON(http.StatusOK, merchant)
+	})
+	
 	// Reviews
 	router.POST("/api/reviews", func(c *gin.Context) {
 		var review ReviewCreate
@@ -198,10 +339,19 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid input"})
 			return
 		}
-		fmt.Printf("Simulate creating review: %+v\n", review)
+
+		network := gateway.GetNetwork("mychannel")
+		contract := network.GetContract("reviews")
+
+		txID, err := contract.SubmitTransaction("CreateReview", review.MerchantID, strconv.Itoa(review.Rating), review.Comment)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Submit failed: " + err.Error()})
+			return
+		}
+
 		c.JSON(http.StatusOK, TxResponse{
 			Message: "Review submitted successfully, waiting for blockchain confirmation",
-			TxID:    "fake_tx_id_" + time.Now().Format("20060102150405"),
+			TxID:    string(txID),
 		})
 	})
 
@@ -211,11 +361,24 @@ func main() {
 			c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
 			return
 		}
-		myReviews := []Review{}
-		for _, r := range fakeReviews {
-			if r.AuthorID == loggedInUser.StudentID {
-				myReviews = append(myReviews, r)
-			}
+
+		// 假设从 token 或上下文获取 authorID
+		authorID := loggedInUser.StudentID  // 替换为真实获取
+
+		network := gateway.GetNetwork("mychannel")
+		contract := network.GetContract("reviews")
+
+		result, err := contract.EvaluateTransaction("GetReviewsByAuthor", authorID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Query failed: " + err.Error()})
+			return
+		}
+
+		var myReviews []Review
+		err = json.Unmarshal(result, &myReviews)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "Unmarshal failed"})
+			return
 		}
 		c.JSON(http.StatusOK, myReviews)
 	})
