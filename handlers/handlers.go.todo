@@ -9,6 +9,7 @@ import (
 
 	"github.com/ZJURateTeam/ZJURate-backend/models"
 	"github.com/ZJURateTeam/ZJURate-backend/services"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -51,6 +52,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
+	// 1. Hash the password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to hash password"})
+		return
+	}
+
+	user.Password = string(hashedPassword) // Store the hashed password
+
+	// 2. Call blockchain service to register the user
 	if err := h.blockchainService.RegisterUser(user); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Registration failed", "error": err.Error()})
 		return
@@ -67,12 +78,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// 1. Call blockchain service to authenticate the user
 	user, err := h.blockchainService.LoginUser(login)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "Authentication failed", "error": err.Error()})
 		return
 	}
 
+	// 2. Generate a JWT token
 	tokenString, err := h.generateToken(*user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to generate token"})
@@ -106,50 +119,21 @@ func NewMerchantsHandler(bs *services.BlockchainService) *MerchantsHandler {
 
 // ListMerchants fetches all merchants from the blockchain.
 func (h *MerchantsHandler) ListMerchants(c *gin.Context) {
-	merchants, err := h.blockchainService.GetAllMerchants()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to get merchants", "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, merchants)
+	// TODO: Call h.blockchainService.GetAllMerchants()
+	c.JSON(http.StatusOK, []models.MerchantSummary{})
 }
 
 // GetMerchant fetches a single merchant and their reviews.
 func (h *MerchantsHandler) GetMerchant(c *gin.Context) {
 	id := c.Param("id")
-	merchant, err := h.blockchainService.GetMerchant(id)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"message": "Merchant not found", "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, merchant)
+	// TODO: Call h.blockchainService.GetMerchant(id)
+	c.JSON(http.StatusOK, models.MerchantDetails{ID: id})
 }
 
 // CreateMerchant handles the creation of a new merchant.
 func (h *MerchantsHandler) CreateMerchant(c *gin.Context) {
-	var merchant models.MerchantDetails
-	if err := c.ShouldBindJSON(&merchant); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Invalid input"})
-		return
-	}
-
-	user, exists := c.Get("user")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
-		return
-	}
-	loggedInUser := user.(models.User)
-
-	txID, err := h.blockchainService.CreateMerchant(loggedInUser.StudentID, merchant)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to submit merchant creation", "error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, models.TxResponse{
-		Message: "Merchant creation submitted successfully",
-		TxID:    txID,
-	})
+	// TODO: Add logic for creating a new merchant on the blockchain
+	c.JSON(http.StatusOK, models.Message{Message: "Merchant creation submitted"})
 }
 
 // ReviewsHandler handles review-related logic.
@@ -192,17 +176,6 @@ func (h *ReviewsHandler) CreateReview(c *gin.Context) {
 
 // GetMyReviews fetches reviews written by the current user.
 func (h *ReviewsHandler) GetMyReviews(c *gin.Context) {
-	user, exists := c.Get("user")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "Unauthorized"})
-		return
-	}
-	loggedInUser := user.(models.User)
-
-	reviews, err := h.blockchainService.GetReviewsByUser(loggedInUser.StudentID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to get my reviews", "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, reviews)
+	// TODO: Get user ID from context, call h.blockchainService.GetReviewsByUser(userID)
+	c.JSON(http.StatusOK, []models.Review{})
 }
