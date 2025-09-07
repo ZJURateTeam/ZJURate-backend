@@ -6,4 +6,7 @@ ZJURate-backend
 prompt.txt
 
 keystore.db
+user.db
 uploads
+vendor
+wallet
