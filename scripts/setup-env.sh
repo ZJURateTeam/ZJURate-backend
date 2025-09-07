@@ -1,5 +1,6 @@
 #!/bin/bash
-# PATH: The binary path for fabric
-export PATH=$PATH:~/fabric-samples/bin
-export FABRIC_CFG_PATH=~/fabric-samples/config
+FABRIC_PATH=~/fabric-samples
+
+export PATH=$PATH:$FABRIC_PATH/bin
+export FABRIC_CFG_PATH=$FABRIC_PATH/config
 export DISCOVERY_AS_LOCALHOST=true
