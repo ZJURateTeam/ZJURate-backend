@@ -23,6 +23,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create blockchain service: %v", err)
 	}
+	defer blockchainService.Close()
 
 	router := gin.Default()
 
