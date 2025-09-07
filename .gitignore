@@ -2,6 +2,10 @@ ZJURate-backend.exe
 ZJURate-backend
 
 .vscode
+
+prompt.txt
+
+keystore.db
+uploads
 vendor
 wallet
-connection.yaml
