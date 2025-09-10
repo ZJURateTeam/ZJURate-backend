@@ -2,83 +2,107 @@
 package services
 
 import (
-    "crypto/x509"
     "encoding/json"
     "fmt"
     "os"
     "path/filepath"
     "strconv"
     "sync"
-    "time"
 
     "github.com/ZJURateTeam/ZJURate-backend/models"
     "golang.org/x/crypto/bcrypt"
     "github.com/hyperledger/fabric-gateway/pkg/client"
-    "github.com/hyperledger/fabric-gateway/pkg/identity"
-    "github.com/hyperledger/fabric-gateway/pkg/hash"
     "google.golang.org/grpc"
-    "google.golang.org/grpc/credentials"
+	calib "github.com/hyperledger/fabric-ca/lib"
 )
 
 // BlockchainService manages interactions with the Hyperledger Fabric network.
-// This implementation uses the real Fabric gateway instead of mock in-memory ledger but without auth logic
+// 暂时考虑单 org
 type BlockchainService struct {
-    keyStore  *KeyStore
-    userStore *SQLiteKeyStore  // For local password storage
-    gateway   *client.Gateway   // Real Fabric gateway connection
-    mu        sync.RWMutex      // Mutex to protect concurrent access
+	keyStore  *KeyStore
+	userStore *SQLiteKeyStore
+
+	caCfg   CAConfig
+	caAdmin *calib.Client
+
+	conns   map[string]*grpc.ClientConn // 多 peer 连接池（可只配一个）
+	primary string                      // 首选 peer 地址
+
+	mu sync.RWMutex
+}
+
+type PeerEndpoint struct {
+    Address            string // e.g. "localhost:7051"
+    ServerNameOverride string // e.g. "localhost"（与 peer 证书 CN/SAN 匹配）
+    TlsCACertPath      string
 }
 
 // NewBlockchainService creates a new instance of the blockchain service.
-func NewBlockchainService(ks *KeyStore) (*BlockchainService, error) {
-    fmt.Println("Blockchain service initialized with real Fabric gateway")
+func NewBlockchainService(ks *KeyStore, caCfgPath string, peers []PeerEndpoint) (*BlockchainService, error) {
+    caCfg, err := LoadCAConfigFromFile(caCfgPath)
+    if err != nil {
+        return nil, fmt.Errorf("load ca config: %w", err)
+    }
+
     userStore, err := NewSQLiteKeyStore("user.db")
     if err != nil {
         return nil, fmt.Errorf("failed to create user store: %w", err)
     }
 
     // Initialize Fabric gateway connection
-    clientConnection, err := newGrpcConnection()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
+    conns := make(map[string]*grpc.ClientConn)
+    for _, p := range peers {
+        conn, err := newGrpcConnection(p.Address, p.ServerNameOverride, p.TlsCACertPath)
+        if err != nil { 
+            return nil, fmt.Errorf("dial %s: %w", p.Address, err) 
+        }
+        conns[p.Address] = conn
     }
-
-    id, err := newIdentity()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create identity: %w", err)
+    if len(conns) == 0 {
+        return nil, fmt.Errorf("no peer connections")
     }
+    primary := peers[0].Address
 
-    sign, err := newSign()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create sign: %w", err)
+    if err := os.MkdirAll(caCfg.HomeDir, 0o755); err != nil {
+        for _, c := range conns { 
+            _ = c.Close() 
+        }
+        return nil, fmt.Errorf("prepare registrar home: %w", err)
     }
-
-    gw, err := client.Connect(
-        id,
-        client.WithSign(sign),
-        client.WithHash(hash.SHA256),
-        client.WithClientConnection(clientConnection),
-        client.WithEvaluateTimeout(5*time.Second),
-        client.WithEndorseTimeout(15*time.Second),
-        client.WithSubmitTimeout(5*time.Second),
-        client.WithCommitStatusTimeout(1*time.Minute),
-    )
+    caAdmin, err := NewRegistrarClient(caCfg)
     if err != nil {
-        return nil, fmt.Errorf("failed to connect to gateway: %w", err)
+        for _, c:= range conns {
+            _ = c.Close()
+        }
+        return nil, fmt.Errorf("new registrar: %w", err)
     }
 
     return &BlockchainService{
         keyStore:  ks,
         userStore: userStore,
-        gateway:   gw,
+        caCfg: caCfg,
+        caAdmin: caAdmin,
+        conns: conns,
+        primary: primary,
         mu:        sync.RWMutex{},
     }, nil
 }
 
+// Close closes the gateway connection.
+func (s *BlockchainService) Close() {
+    if s.userStore != nil {
+        s.userStore.Close()
+    }
+    for _, c := range s.conns {
+        c.Close()
+    }
+}
+
+
+// handlers处理
 // RegisterUser generates a key pair and records the user in the ledger.
 func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
     s.mu.Lock()
-    defer s.mu.Unlock()
 
     // 1. Save user data to the persistent store
     hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
@@ -94,23 +118,28 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
     if _, err := s.keyStore.GenerateKeyPair(user.StudentID); err != nil {
         return fmt.Errorf("failed to generate key pair: %w", err)
     }
+    s.mu.Unlock()
 
     // 3. Submit user registration to the real blockchain ledger.
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-    _, err = contract.SubmitTransaction("CreateUser", user.StudentID, user.Username)
-    if err != nil {
-        return fmt.Errorf("failed to create user on blockchain: %w", err)
-    }
-
-    fmt.Printf("Blockchain: Registered user %s. Submitted to ledger.\n", user.StudentID)
-    return nil
+	if err := s.ensureUserEnrolled(user.StudentID); err != nil {
+		return fmt.Errorf("issue cert: %w", err)
+	}
+    // 目前仅考虑组织 Org1
+    return s.withUserGateway(user.StudentID, "Org1MSP", func(gw *client.Gateway) error {
+        fmt.Println("entering createuser with chain")
+		network := gw.GetNetwork("mychannel")
+		contract := network.GetContract("review")
+		if _, err := contract.SubmitTransaction("CreateUser", user.StudentID, user.Username); err != nil {
+			return fmt.Errorf("failed to create user on blockchain: %w", err)
+		}
+		fmt.Printf("Blockchain: Registered user %s (own cert) & submitted to ledger.\n", user.StudentID)
+		return nil
+	})
 }
 
 // LoginUser authenticates a user.
 func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, error) {
     s.mu.RLock()
-    defer s.mu.RUnlock()
 
     user, err := s.userStore.GetUser(login.StudentID)
     if err != nil {
@@ -121,13 +150,21 @@ func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, err
         return nil, fmt.Errorf("invalid password")
     }
 
+    if _, err := os.Stat(filepath.Join(s.caCfg.HomeDir, login.StudentID, "msp", "signcerts", "cert.pem")); err != nil {
+		return nil, fmt.Errorf("no enrollment; please re-register")
+	}
+    s.mu.RUnlock()
+
     // Verify user existence on blockchain
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-    _, err = contract.EvaluateTransaction("GetUserByID", login.StudentID)
-    if err != nil {
-        return nil, fmt.Errorf("user not found on blockchain: %w", err)
-    }
+	if err := s.withUserGateway(login.StudentID, "Org1MSP", func(gw *client.Gateway) error {
+		network := gw.GetNetwork("mychannel")
+		contract := network.GetContract("review")
+		_, e := contract.EvaluateTransaction("GetUserByID", login.StudentID)
+		return e
+	}); err != nil {
+		return nil, fmt.Errorf("user not found on blockchain: %w", err)
+	}
+
 
     fmt.Printf("Blockchain: User %s authenticated successfully.\n", login.StudentID)
     return &models.User{StudentID: user.StudentID, Username: user.Username}, nil
@@ -136,37 +173,48 @@ func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, err
 // GetAllMerchants fetches all merchants from the ledger.
 func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) {
     s.mu.RLock()
-    defer s.mu.RUnlock()
 
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-
-    result, err := contract.EvaluateTransaction("GetAllMerchants")
-    if err != nil {
-        return nil, err
+    // 确保 reader 身份存在
+    if err := s.ensureUserEnrolled("reader"); err != nil {
+        return nil, fmt.Errorf("ensure reader enrolled: %w", err)
     }
-	fmt.Println("Raw result:", string(result))
+
+    s.mu.RUnlock()
 
     var merchants []models.MerchantSummary
-    err = json.Unmarshal(result, &merchants)
-    if err != nil {
-        return nil, err
-    }
+    err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {
+        network := gw.GetNetwork("mychannel")
+        contract := network.GetContract("review")
 
-    // Calculate average rating dynamically
-    for i := range merchants {
-        reviewsResult, err := contract.EvaluateTransaction("GetReviewsByMerchant", merchants[i].ID)
-        if err == nil {
-            var reviews []models.Review
-            json.Unmarshal(reviewsResult, &reviews)
-            if len(reviews) > 0 {
-                total := 0
-                for _, r := range reviews {
-                    total += r.Rating
+        result, err := contract.EvaluateTransaction("GetAllMerchants")
+        if err != nil {
+            return err
+        }
+        fmt.Println("Raw result:", string(result))
+
+        if err := json.Unmarshal(result, &merchants); err != nil {
+            return err
+        }
+
+        // 动态计算平均评分
+        for i := range merchants {
+            reviewsResult, e := contract.EvaluateTransaction("GetReviewsByMerchant", merchants[i].ID)
+            if e == nil {
+                var reviews []models.Review
+                _ = json.Unmarshal(reviewsResult, &reviews)
+                if len(reviews) > 0 {
+                    total := 0
+                    for _, r := range reviews {
+                        total += r.Rating
+                    }
+                    merchants[i].AverageRating = float64(total) / float64(len(reviews))
                 }
-                merchants[i].AverageRating = float64(total) / float64(len(reviews))
             }
         }
+        return nil
+    })
+    if err != nil {
+        return nil, err
     }
     return merchants, nil
 }
@@ -174,180 +222,131 @@ func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) 
 // GetMerchant fetches a single merchant and their reviews from the ledger.
 func (s *BlockchainService) GetMerchant(merchantID string) (*models.MerchantDetails, error) {
     s.mu.RLock()
-    defer s.mu.RUnlock()
 
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-
-    merchantResult, err := contract.EvaluateTransaction("GetMerchantByID", merchantID)
-    if err != nil {
-        return nil, err
+    // 确保 reader 身份存在
+    if err := s.ensureUserEnrolled("reader"); err != nil {
+        return nil, fmt.Errorf("ensure reader enrolled: %w", err)
     }
+
+    s.mu.RUnlock()
 
     var merchant models.MerchantDetails
-    err = json.Unmarshal(merchantResult, &merchant)
+    err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {
+        network := gw.GetNetwork("mychannel")
+        contract := network.GetContract("review")
+
+        merchantResult, err := contract.EvaluateTransaction("GetMerchantByID", merchantID)
+        if err != nil {
+            return err
+        }
+        if err := json.Unmarshal(merchantResult, &merchant); err != nil {
+            return err
+        }
+
+        reviewsResult, err := contract.EvaluateTransaction("GetReviewsByMerchant", merchantID)
+        if err == nil {
+            var reviews []models.Review
+            _ = json.Unmarshal(reviewsResult, &reviews)
+            merchant.Reviews = reviews
+            if len(reviews) > 0 {
+                total := 0
+                for _, r := range reviews {
+                    total += r.Rating
+                }
+                merchant.AverageRating = float64(total) / float64(len(reviews))
+            }
+        }
+        return nil
+    })
     if err != nil {
         return nil, err
     }
-
-    reviewsResult, err := contract.EvaluateTransaction("GetReviewsByMerchant", merchantID)
-    if err == nil {
-        var reviews []models.Review
-        json.Unmarshal(reviewsResult, &reviews)
-        merchant.Reviews = reviews
-        if len(reviews) > 0 {
-            total := 0
-            for _, r := range reviews {
-                total += r.Rating
-            }
-            merchant.AverageRating = float64(total) / float64(len(reviews))
-        }
-    }
-
     return &merchant, nil
 }
 
 // CreateMerchant submits a new merchant to the ledger.
 func (s *BlockchainService) CreateMerchant(studentID string, merchant models.MerchantDetails) (string, error) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
+	s.mu.Lock()
 
-    // Simulate signing the transaction payload.
-    payload := fmt.Sprintf("%s-%s-%s", merchant.ID, merchant.Name, studentID)
-    _, err := s.keyStore.Sign(studentID, []byte(payload))
-    if err != nil {
-        return "", fmt.Errorf("failed to sign transaction: %w", err)
-    }
+	// 业务侧签名（可选）
+	payload := fmt.Sprintf("%s-%s-%s", merchant.ID, merchant.Name, studentID)
+	if _, err := s.keyStore.Sign(studentID, []byte(payload)); err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %w", err)
+	}
+    s.mu.Unlock()
 
-    // Submit to real blockchain
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-    txIDBytes, err := contract.SubmitTransaction("CreateMerchant", merchant.ID, merchant.Name, merchant.Address, merchant.Category)
-    if err != nil {
-        return "", err
-    }
-    txID := string(txIDBytes)
+	var txID string
+	err := s.withUserGateway(studentID, "Org1MSP", func(gw *client.Gateway) error {
+		network := gw.GetNetwork("mychannel")
+		contract := network.GetContract("review")
+		b, e := contract.SubmitTransaction("CreateMerchant", merchant.ID, merchant.Name, merchant.Address, merchant.Category)
+		if e != nil {
+			return e
+		}
+		txID = string(b)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
 
-    fmt.Printf("Blockchain: New merchant '%s' created by user '%s' with txID %s.\n", merchant.Name, studentID, txID)
-    return txID, nil
+	fmt.Printf("Blockchain: New merchant '%s' created by user '%s' with txID %s.\n", merchant.Name, studentID, txID)
+	return txID, nil
 }
-
 // CreateReview submits a new review to the ledger.
 func (s *BlockchainService) CreateReview(studentID string, review models.ReviewCreate) (string, error) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
+	s.mu.Lock()
 
-    // Simulate signing the transaction payload.
-    payload := fmt.Sprintf("%s-%d-%s", review.MerchantID, review.Rating, studentID)
-    _, err := s.keyStore.Sign(studentID, []byte(payload))
-    if err != nil {
-        return "", fmt.Errorf("failed to sign transaction: %w", err)
-    }
+	// 业务侧签名（可选）
+	payload := fmt.Sprintf("%s-%d-%s", review.MerchantID, review.Rating, studentID)
+	if _, err := s.keyStore.Sign(studentID, []byte(payload)); err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %w", err)
+	}
+    s.mu.Unlock()
 
-    // Submit to real blockchain
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-    txIDBytes, err := contract.SubmitTransaction("CreateReview", review.MerchantID, studentID, strconv.Itoa(review.Rating), review.Comment)
-    if err != nil {
-        return "", err
-    }
-    txID := string(txIDBytes)
+	var txID string
+	err := s.withUserGateway(studentID, "Org1MSP", func(gw *client.Gateway) error {
+		network := gw.GetNetwork("mychannel")
+		contract := network.GetContract("review")
+		b, e := contract.SubmitTransaction("CreateReview", review.MerchantID, studentID, strconv.Itoa(review.Rating), review.Comment)
+		if e != nil {
+			return e
+		}
+		txID = string(b)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
 
-    fmt.Printf("Blockchain: New review for merchant '%s' submitted by user '%s' with txID %s.\n", review.MerchantID, studentID, txID)
-    return txID, nil
+	fmt.Printf("Blockchain: New review for merchant '%s' submitted by user '%s' with txID %s.\n", review.MerchantID, studentID, txID)
+	return txID, nil
 }
 
 // GetReviewsByUser fetches reviews by a specific user ID from the ledger.
 func (s *BlockchainService) GetReviewsByUser(userID string) ([]models.Review, error) {
     s.mu.RLock()
-    defer s.mu.RUnlock()
 
-    network := s.gateway.GetNetwork("mychannel")
-    contract := network.GetContract("review")
-
-    result, err := contract.EvaluateTransaction("GetReviewsByAuthor", userID)
-    if err != nil {
-        return nil, err
+    // 确保 reader 身份存在
+    if err := s.ensureUserEnrolled("reader"); err != nil {
+        return nil, fmt.Errorf("ensure reader enrolled: %w", err)
     }
 
+    s.mu.RUnlock()
+
     var reviews []models.Review
-    err = json.Unmarshal(result, &reviews)
+    err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {
+        network := gw.GetNetwork("mychannel")
+        contract := network.GetContract("review")
+
+        result, err := contract.EvaluateTransaction("GetReviewsByAuthor", userID)
+        if err != nil {
+            return err
+        }
+        return json.Unmarshal(result, &reviews)
+    })
     if err != nil {
         return nil, err
     }
     return reviews, nil
-}
-
-// Close closes the gateway connection.
-func (s *BlockchainService) Close() {
-    if s.gateway != nil {
-        s.gateway.Close()
-    }
-}
-
-// newGrpcConnection creates a gRPC connection to the Gateway server.
-func newGrpcConnection() (*grpc.ClientConn, error) {
-    certPath := filepath.Join("wallet", "appUser", "tlscacerts", "tls-ca-cert.pem")  // 调整为您的 TLS CA 路径
-    certificatePEM, err := os.ReadFile(certPath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read TLS certificate: %w", err)
-    }
-
-    certificate, err := identity.CertificateFromPEM(certificatePEM)
-    if err != nil {
-        return nil, err
-    }
-
-    certPool := x509.NewCertPool()
-    certPool.AddCert(certificate)
-    transportCredentials := credentials.NewClientTLSFromCert(certPool, "localhost")  // 调整 gateway host 如果非 localhost
-
-    connection, err := grpc.Dial("localhost:7051", grpc.WithTransportCredentials(transportCredentials))  // 调整 peer endpoint
-    if err != nil {
-        return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
-    }
-
-    return connection, nil
-}
-
-// newIdentity creates a client identity using an X.509 certificate.
-func newIdentity() (*identity.X509Identity, error) {
-    certPath := filepath.Join("wallet", "appUser", "signcerts", "cert.pem")  // 调整为您的 cert 路径
-    certificatePEM, err := os.ReadFile(certPath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read certificate: %w", err)
-    }
-
-    certificate, err := identity.CertificateFromPEM(certificatePEM)
-    if err != nil {
-        return nil, err
-    }
-
-    id, err := identity.NewX509Identity("Org1MSP", certificate)  // MSP ID 调整为您的组织
-    if err != nil {
-        return nil, err
-    }
-
-    return id, nil
-}
-
-// newSign creates a function that generates a digital signature from a message digest using a private key.
-func newSign() (identity.Sign, error) {
-    keyPath := filepath.Join("wallet", "appUser", "keystore", "priv_sk")  // 调整为您的私钥路径
-    privateKeyPEM, err := os.ReadFile(keyPath)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read private key: %w", err)
-    }
-
-    privateKey, err := identity.PrivateKeyFromPEM(privateKeyPEM)
-    if err != nil {
-        return nil, err
-    }
-
-    sign, err := identity.NewPrivateKeySign(privateKey)
-    if err != nil {
-        return nil, err
-    }
-
-    return sign, nil
 }
