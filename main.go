@@ -13,21 +13,16 @@ import (
 )
 
 func main() {
-	keyStore, err := services.NewKeyStore("keystore.db")
-	if err != nil {
-		log.Fatalf("Failed to create key store: %v", err)
-	}
-	defer keyStore.PrivateKeyStore.Close() // 确保在应用退出时关闭数据库连接
-
+	// NewBlockchainService 函数签名已修改，不再需要 keyStore 参数
 	peers := []services.PeerEndpoint{
 		{
-			Address:            "localhost:7051", // 你的 peer/gateway 入口
-			ServerNameOverride: "peer0.org1.example.com",      // 必须匹配该 peer TLS 证书的 CN/SAN
-			TlsCACertPath: "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-peer-ca.pem",
+			Address:            "localhost:7051",         // 你的 peer/gateway 入口
+			ServerNameOverride: "peer0.org1.example.com", // 必须匹配该 peer TLS 证书的 CN/SAN
+			TlsCACertPath:      "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-peer-ca.pem",
 		},
 	}
 	caCfgPath := "/home/kwanny/ZJURate-backend/services/ca_config.json"
-	blockchainService, err := services.NewBlockchainService(keyStore, caCfgPath, peers)
+	blockchainService, err := services.NewBlockchainService(caCfgPath, peers)
 	if err != nil {
 		log.Fatalf("Failed to create blockchain service: %v", err)
 	}

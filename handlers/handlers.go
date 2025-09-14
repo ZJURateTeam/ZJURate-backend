@@ -140,6 +140,7 @@ func (h *MerchantsHandler) CreateMerchant(c *gin.Context) {
 	}
 	loggedInUser := user.(models.User)
 
+	// 移除业务侧签名逻辑
 	txID, err := h.blockchainService.CreateMerchant(loggedInUser.StudentID, merchant)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to submit merchant creation", "error": err.Error()})
@@ -177,7 +178,7 @@ func (h *ReviewsHandler) CreateReview(c *gin.Context) {
 	}
 	loggedInUser := user.(models.User)
 
-	// 调用服务层，传入用户学号以进行签名
+	// 移除业务侧签名逻辑
 	txID, err := h.blockchainService.CreateReview(loggedInUser.StudentID, review)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to submit review", "error": err.Error()})
