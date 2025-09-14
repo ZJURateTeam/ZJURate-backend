@@ -5,7 +5,7 @@ fabric:
   ca:
     url: "https://localhost:7054"
     caName: "ca-org1"
-    tlsCACert: "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-ca-cert.pem"
+    tlsCACert: "/home/kwanny/fabric-samples/test-network/organizations/fabric-ca/org1/ca-cert.pem"
   client:
     homeDir: "/home/kwanny/ZJURate-backend/wallet/org1"
     mspDir: "msp"
@@ -15,7 +15,7 @@ fabric:
   peers:
     - address: "localhost:7051"
       serverNameOverride: "peer0.org1.example.com"
-      tlsCACertPath: "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-peer-ca.pem"
+      tlsCACertPath: "/home/kwanny/fabric-samples/test-network/organizations/peerOrganizations/org1.example.com/tlsca/tlsca.org1.example.com-cert.pem"
 
 jwt:
   secretKey: "supersecretjwtkeyforzjurate"
