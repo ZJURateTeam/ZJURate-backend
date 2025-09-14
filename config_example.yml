@@ -1,0 +1,21 @@
+app:
+  port: 3000
+
+fabric:
+  ca:
+    url: "https://localhost:7054"
+    caName: "ca-org1"
+    tlsCACert: "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-ca-cert.pem"
+  client:
+    homeDir: "/home/kwanny/ZJURate-backend/wallet/org1"
+    mspDir: "msp"
+  registrar:
+    id: "admin"
+    secret: "adminpw"
+  peers:
+    - address: "localhost:7051"
+      serverNameOverride: "peer0.org1.example.com"
+      tlsCACertPath: "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-peer-ca.pem"
+
+jwt:
+  secretKey: "supersecretjwtkeyforzjurate"

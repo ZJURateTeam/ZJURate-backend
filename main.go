@@ -1,28 +1,70 @@
-// main.go
 package main
 
 import (
+	"flag"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/ZJURateTeam/ZJURate-backend/handlers"
 	"github.com/ZJURateTeam/ZJURate-backend/services"
-
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v2"
 )
 
+// Config holds all application configurations.
+type Config struct {
+	App struct {
+		Port int `yaml:"port"`
+	} `yaml:"app"`
+	Fabric struct {
+		CA struct {
+			URL       string `yaml:"url"`
+			CAName    string `yaml:"caName"`
+			TLSCACert string `yaml:"tlsCACert"`
+		} `yaml:"ca"`
+		Client struct {
+			HomeDir string `yaml:"homeDir"`
+			MSPDir  string `yaml:"mspDir"`
+		} `yaml:"client"`
+		Registrar struct {
+			ID     string `yaml:"id"`
+			Secret string `yaml:"secret"`
+		} `yaml:"registrar"`
+		Peers []services.PeerEndpoint `yaml:"peers"`
+	} `yaml:"fabric"`
+	JWT struct {
+		SecretKey string `yaml:"secretKey"`
+	} `yaml:"jwt"`
+}
+
 func main() {
-	// NewBlockchainService 函数签名已修改，不再需要 keyStore 参数
-	peers := []services.PeerEndpoint{
-		{
-			Address:            "localhost:7051",         // 你的 peer/gateway 入口
-			ServerNameOverride: "peer0.org1.example.com", // 必须匹配该 peer TLS 证书的 CN/SAN
-			TlsCACertPath:      "/home/kwanny/ZJURate-backend/wallet/org1/tlscacerts/tls-peer-ca.pem",
-		},
+	var configPath string
+	flag.StringVar(&configPath, "config", "config.yml", "Path to the configuration file")
+	flag.Parse()
+
+	configFile, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		log.Fatalf("Fatal error reading config file '%s': %s", configPath, err)
 	}
-	caCfgPath := "/home/kwanny/ZJURate-backend/services/ca_config.json"
-	blockchainService, err := services.NewBlockchainService(caCfgPath, peers)
+
+	var cfg Config
+	if err := yaml.Unmarshal(configFile, &cfg); err != nil {
+		log.Fatalf("Fatal error unmarshalling config: %s", err)
+	}
+
+	caConfig := services.CAConfig{
+		URL:             cfg.Fabric.CA.URL,
+		CAName:          cfg.Fabric.CA.CAName,
+		TLSCACert:       cfg.Fabric.CA.TLSCACert,
+		HomeDir:         cfg.Fabric.Client.HomeDir,
+		RegistrarID:     cfg.Fabric.Registrar.ID,
+		RegistrarSecret: cfg.Fabric.Registrar.Secret,
+	}
+
+	blockchainService, err := services.NewBlockchainService(caConfig, cfg.Fabric.Peers)
 	if err != nil {
 		log.Fatalf("Failed to create blockchain service: %v", err)
 	}
@@ -30,7 +72,6 @@ func main() {
 
 	router := gin.Default()
 
-	// CORS middleware
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -42,59 +83,53 @@ func main() {
 		c.Next()
 	})
 
-	// Inject the blockchain service into the handlers
-	authHandler := handlers.NewAuthHandler(blockchainService)
+	authHandler := handlers.NewAuthHandler(blockchainService, cfg.JWT.SecretKey)
 	merchantsHandler := handlers.NewMerchantsHandler(blockchainService)
 	reviewsHandler := handlers.NewReviewsHandler(blockchainService)
 	uploadHandler := handlers.NewUploadHandler()
 
-	// Root
+	authMiddleware := handlers.AuthMiddleware(cfg.JWT.SecretKey)
+
 	router.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "ZJURate Backend API"})
 	})
 
 	api := router.Group("/api")
 	{
-		// Auth Routes
 		auth := api.Group("/auth")
 		{
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
-			auth.GET("/me", handlers.AuthMiddleware, authHandler.GetMe)
+			auth.GET("/me", authMiddleware, authHandler.GetMe)
 		}
 
-		// Merchants Routes
 		merchants := api.Group("/merchants")
 		{
 			merchants.GET("/", merchantsHandler.ListMerchants)
 			merchants.GET("/:id", merchantsHandler.GetMerchant)
-			merchants.POST("/", handlers.AuthMiddleware, merchantsHandler.CreateMerchant) // New endpoint
+			merchants.POST("/", authMiddleware, merchantsHandler.CreateMerchant)
 		}
 
-		// Reviews Routes
 		reviews := api.Group("/reviews")
 		{
-			reviews.POST("/", handlers.AuthMiddleware, reviewsHandler.CreateReview)
-			reviews.GET("/my", handlers.AuthMiddleware, reviewsHandler.GetMyReviews)
+			reviews.POST("/", authMiddleware, reviewsHandler.CreateReview)
+			reviews.GET("/my", authMiddleware, reviewsHandler.GetMyReviews)
 		}
 
-		// Upload Routes
 		upload := api.Group("/upload")
 		{
-			upload.POST("/image", handlers.AuthMiddleware, uploadHandler.UploadImage)
+			upload.POST("/image", authMiddleware, uploadHandler.UploadImage)
 		}
 	}
 
 	router.Static("/uploads", "./uploads")
-
-	// 确保 'uploads' 目录存在
 	if _, err := os.Stat("./uploads"); os.IsNotExist(err) {
 		os.Mkdir("./uploads", 0755)
 	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = strconv.Itoa(cfg.App.Port)
 	}
 	router.Run(":" + port)
 }

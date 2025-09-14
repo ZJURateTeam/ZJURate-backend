@@ -1,4 +1,3 @@
-// services/blockchain.go
 package services
 
 import (
@@ -30,20 +29,16 @@ type BlockchainService struct {
 	mu sync.RWMutex
 }
 
+// PeerEndpoint `yaml` tag is added for go-yaml unmarshalling.
 type PeerEndpoint struct {
-	Address            string // e.g. "localhost:7051"
-	ServerNameOverride string // e.g. "localhost"（与 peer 证书 CN/SAN 匹配）
-	TlsCACertPath      string
+	Address            string `yaml:"address"`
+	ServerNameOverride string `yaml:"serverNameOverride"`
+	TlsCACertPath      string `yaml:"tlsCACertPath"`
 }
 
 // NewBlockchainService creates a new instance of the blockchain service.
-// 移除了 keyStore 参数
-func NewBlockchainService(caCfgPath string, peers []PeerEndpoint) (*BlockchainService, error) {
-	caCfg, err := LoadCAConfigFromFile(caCfgPath)
-	if err != nil {
-		return nil, fmt.Errorf("load ca config: %w", err)
-	}
-
+// 移除了 keyStore 参数，并直接接收 CAConfig 结构体
+func NewBlockchainService(caCfg CAConfig, peers []PeerEndpoint) (*BlockchainService, error) {
 	userStore, err := NewSQLiteKeyStore("user.db")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user store: %w", err)
@@ -97,13 +92,11 @@ func (s *BlockchainService) Close() {
 	}
 }
 
-// handlers处理
 // RegisterUser generates a key pair and records the user in the ledger.
 func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 1. Save user data to the persistent store
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
@@ -113,13 +106,10 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 		return fmt.Errorf("failed to save user to store: %w", err)
 	}
 
-	// 2. 移除 GenerateKeyPair 的调用，直接依赖 ensureUserEnrolled
-
-	// 3. Submit user registration to the real blockchain ledger.
 	if err := s.ensureUserEnrolled(user.StudentID); err != nil {
 		return fmt.Errorf("issue cert: %w", err)
 	}
-	// 目前仅考虑组织 Org1
+
 	return s.withUserGateway(user.StudentID, "Org1MSP", func(gw *client.Gateway) error {
 		fmt.Println("entering createuser with chain")
 		network := gw.GetNetwork("mychannel")
@@ -135,6 +125,7 @@ func (s *BlockchainService) RegisterUser(user models.UserRegister) error {
 // LoginUser authenticates a user.
 func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	user, err := s.userStore.GetUser(login.StudentID)
 	if err != nil {
@@ -145,13 +136,10 @@ func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, err
 		return nil, fmt.Errorf("invalid password")
 	}
 
-	// 检查用户本地 MSP 目录是否存在证书
 	if _, err := os.Stat(filepath.Join(s.caCfg.HomeDir, login.StudentID, "msp", "signcerts", "cert.pem")); err != nil {
 		return nil, fmt.Errorf("no enrollment; please re-register")
 	}
-	s.mu.RUnlock()
 
-	// Verify user existence on blockchain
 	if err := s.withUserGateway(login.StudentID, "Org1MSP", func(gw *client.Gateway) error {
 		network := gw.GetNetwork("mychannel")
 		contract := network.GetContract("review")
@@ -168,13 +156,11 @@ func (s *BlockchainService) LoginUser(login models.UserLogin) (*models.User, err
 // GetAllMerchants fetches all merchants from the ledger.
 func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	// 确保 reader 身份存在
 	if err := s.ensureUserEnrolled("reader"); err != nil {
 		return nil, fmt.Errorf("ensure reader enrolled: %w", err)
 	}
-
-	s.mu.RUnlock()
 
 	var merchants []models.MerchantSummary
 	err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {
@@ -191,7 +177,6 @@ func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) 
 			return err
 		}
 
-		// 动态计算平均评分
 		for i := range merchants {
 			reviewsResult, e := contract.EvaluateTransaction("GetReviewsByMerchant", merchants[i].ID)
 			if e == nil {
@@ -217,13 +202,11 @@ func (s *BlockchainService) GetAllMerchants() ([]models.MerchantSummary, error) 
 // GetMerchant fetches a single merchant and their reviews from the ledger.
 func (s *BlockchainService) GetMerchant(merchantID string) (*models.MerchantDetails, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	// 确保 reader 身份存在
 	if err := s.ensureUserEnrolled("reader"); err != nil {
 		return nil, fmt.Errorf("ensure reader enrolled: %w", err)
 	}
-
-	s.mu.RUnlock()
 
 	var merchant models.MerchantDetails
 	err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {
@@ -264,8 +247,6 @@ func (s *BlockchainService) CreateMerchant(studentID string, merchant models.Mer
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 移除了业务侧签名逻辑
-
 	var txID string
 	err := s.withUserGateway(studentID, "Org1MSP", func(gw *client.Gateway) error {
 		network := gw.GetNetwork("mychannel")
@@ -290,8 +271,6 @@ func (s *BlockchainService) CreateReview(studentID string, review models.ReviewC
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 移除了业务侧签名逻辑
-
 	var txID string
 	err := s.withUserGateway(studentID, "Org1MSP", func(gw *client.Gateway) error {
 		network := gw.GetNetwork("mychannel")
@@ -314,13 +293,11 @@ func (s *BlockchainService) CreateReview(studentID string, review models.ReviewC
 // GetReviewsByUser fetches reviews by a specific user ID from the ledger.
 func (s *BlockchainService) GetReviewsByUser(userID string) ([]models.Review, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	// 确保 reader 身份存在
 	if err := s.ensureUserEnrolled("reader"); err != nil {
 		return nil, fmt.Errorf("ensure reader enrolled: %w", err)
 	}
-
-	s.mu.RUnlock()
 
 	var reviews []models.Review
 	err := s.withUserGateway("reader", "Org1MSP", func(gw *client.Gateway) error {

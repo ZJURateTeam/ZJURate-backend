@@ -2,9 +2,7 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/ZJURateTeam/ZJURate-backend/models"
@@ -21,15 +19,11 @@ type AuthHandler struct {
 	jwtSecretKey []byte
 }
 
-func NewAuthHandler(bs *services.BlockchainService) *AuthHandler {
-	secretKey := os.Getenv("JWT_SECRET_KEY")
-	if secretKey == "" {
-		secretKey = "supersecretjwtkeyforzjurate"
-		fmt.Println("Warning: JWT_SECRET_KEY environment variable not set, using default key.")
-	}
+// NewAuthHandler now takes the JWT secret key from the configuration.
+func NewAuthHandler(bs *services.BlockchainService, jwtSecret string) *AuthHandler {
 	return &AuthHandler{
 		blockchainService: bs,
-		jwtSecretKey:      []byte(secretKey),
+		jwtSecretKey:      []byte(jwtSecret),
 	}
 }
 
@@ -140,7 +134,6 @@ func (h *MerchantsHandler) CreateMerchant(c *gin.Context) {
 	}
 	loggedInUser := user.(models.User)
 
-	// 移除业务侧签名逻辑
 	txID, err := h.blockchainService.CreateMerchant(loggedInUser.StudentID, merchant)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to submit merchant creation", "error": err.Error()})
@@ -178,7 +171,6 @@ func (h *ReviewsHandler) CreateReview(c *gin.Context) {
 	}
 	loggedInUser := user.(models.User)
 
-	// 移除业务侧签名逻辑
 	txID, err := h.blockchainService.CreateReview(loggedInUser.StudentID, review)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to submit review", "error": err.Error()})
