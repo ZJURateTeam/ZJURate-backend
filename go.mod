@@ -9,7 +9,7 @@ require (
 	github.com/hyperledger/fabric-gateway v1.8.0
 	github.com/mattn/go-sqlite3 v1.14.32
 	golang.org/x/crypto v0.41.0
-	google.golang.org/grpc v1.75.0
+	google.golang.org/grpc v1.75.1
 	gopkg.in/yaml.v2 v2.4.0
 )
 
