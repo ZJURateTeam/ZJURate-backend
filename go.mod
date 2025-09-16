@@ -8,8 +8,8 @@ require (
 	github.com/hyperledger/fabric-ca v1.5.15
 	github.com/hyperledger/fabric-gateway v1.8.0
 	github.com/mattn/go-sqlite3 v1.14.32
-	google.golang.org/grpc v1.75.1
 	golang.org/x/crypto v0.42.0
+	google.golang.org/grpc v1.75.1
 	gopkg.in/yaml.v2 v2.4.0
 )
 
