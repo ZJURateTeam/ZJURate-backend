@@ -220,8 +220,6 @@ func newGrpcConnection(peerEndpoint, serverNameOverride, tlsCACertPath string) (
 }
 
 func (s *BlockchainService) pickConn() *grpc.ClientConn {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if c, ok := s.conns[s.primary]; ok {
 		return c
 	}
