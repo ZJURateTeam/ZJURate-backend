@@ -39,7 +39,7 @@ nav:
     - Merchants: 'API/merchants.md'
     - Reviews: 'API/reviews.md'
     - Files: 'API/files.md'
-  - Configuration: 'configuration/index.md'
+  - Configuration: 'Configuration/index.md'
 
 markdown_extensions:
     - pymdownx.highlight:
