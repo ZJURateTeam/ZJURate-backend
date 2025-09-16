@@ -27,19 +27,3 @@ fabric:
 jwt:
   secretKey: "YourSuperSecretJWTKey" # The secret key for signing JWT tokens.
 ```
-
-**Note:** For production, it's highly recommended to use environment variables to store sensitive information like the `jwt.secretKey` instead of hardcoding it in the configuration file.
-
-## Project Structure 📁
-
-The project is organized into logical packages:
-
-  - **`main.go`**: The entry point of the application. It loads the configuration, initializes services, and sets up the Gin router and its routes.
-  - **`handlers/`**: Contains the API handlers that process incoming requests, interact with services, and send responses.
-      - `handlers.go`: Contains the core handlers for authentication, merchants, and reviews.
-      - `middleware.go`: Defines the JWT authentication middleware used to protect routes.
-      - `upload.go`: Handles the image upload logic.
-  - **`services/`**: Contains the business logic and external service interactions.
-      - `blockchain.go`: [Binary File] Likely handles all interactions with the Hyperledger Fabric network.
-      - `sqlitestore.go`: Manages user data persistence in a local SQLite database.
-  - **`models/`**: Defines the data structures (structs) used throughout the application for requests, responses, and internal data representation.

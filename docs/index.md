@@ -15,4 +15,4 @@ This will create an executable named `ZJURate-backend` (or `ZJURate-backend.exe`
 
 or **[Releases](https://github.com/ZJURateTeam/ZJURate-backend/releases)**
 
-## Documentation
+## [Documentation](https://zjurate-backend.pages.dev/)
